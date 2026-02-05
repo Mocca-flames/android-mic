@@ -3,3 +3,10 @@ captures/
 
 *.iml
 .idea/
+
+# Android
+.gradle
+local.properties
+*.apk
+*.aab
+.DS_Store
