@@ -1,21 +1,92 @@
 package com.fm.digital.service
 
+import android.Manifest
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.fm.digital.R
+import com.fm.digital.networking.ConnectionState
+import com.fm.digital.networking.SignalingClient
+import com.fm.digital.networking.SignalingClientImpl
+import com.fm.digital.networking.SignalingMessage
+import com.fm.digital.ui.Logger
+import com.fm.digital.webrtc.MediasoupManager
+import com.fm.digital.webrtc.WebRtcEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+
+enum class ConnectionQuality {
+    EXCELLENT,
+    GOOD,
+    WARNING,
+    POOR,
+    DISCONNECTED
+}
 
 class BroadcastService : Service() {
 
     private val binder = LocalBinder()
     private var wakeLock: PowerManager.WakeLock? = null
 
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.IO + job)
+
+    private lateinit var webRtcEngine: WebRtcEngine
+    private lateinit var signalingClient: SignalingClient
+    private lateinit var mediasoupManager: MediasoupManager
+
+    private val _broadcastState = MutableStateFlow<BroadcastState>(BroadcastState.Idle)
+    val broadcastState: StateFlow<BroadcastState> = _broadcastState.asStateFlow()
+
     var onServiceDestroyed: (() -> Unit)? = null
+
+    private lateinit var audioManager: AudioManager
+
+    private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
+        .setAcceptsDelayedFocusGain(true)
+        .setOnAudioFocusChangeListener { focusChange ->
+            when (focusChange) {
+                AudioManager.AUDIOFOCUS_LOSS,
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                    // Mic hijacked by a call or another app!
+                    Logger.log("Mic Hijacked! Muting stream to prevent crash.")
+                    pauseBroadcastLocally()
+                }
+                AudioManager.AUDIOFOCUS_GAIN -> {
+                    Logger.log("Mic regained. Resuming broadcast.")
+                    resumeBroadcastLocally()
+                }
+            }
+        }
+        .build()
+
+    private val telephonyManager by lazy { 
+        getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager 
+    }
+
+    private var phoneStateListener: Any? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): BroadcastService = this@BroadcastService
@@ -25,23 +96,185 @@ class BroadcastService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         createNotificationChannel()
         acquireWakeLock()
+        registerPhoneStateListener()
+    }
+
+    private fun initializeManagers(serverUrl: String) {
+        webRtcEngine = WebRtcEngine(this)
+        signalingClient = SignalingClientImpl(serverUrl, scope)
+        mediasoupManager = MediasoupManager(webRtcEngine, signalingClient, scope)
+
+        observeSignalingState()
+        observeMediasoupEvents()
+    }
+
+    private fun observeSignalingState() {
+        scope.launch {
+            signalingClient.connectionState.collect { state ->
+                when (state) {
+                    ConnectionState.CONNECTING -> {
+                        _broadcastState.value = BroadcastState.Connecting
+                        updateNotification("Connecting to server...", ConnectionQuality.DISCONNECTED)
+                    }
+                    ConnectionState.CONNECTED -> {
+                        _broadcastState.value = BroadcastState.Broadcasting("Connected to server", ConnectionQuality.EXCELLENT)
+                        updateNotification("Connected, waiting for audio stream...", ConnectionQuality.GOOD)
+                    }
+                    ConnectionState.DISCONNECTED -> {
+                        _broadcastState.value = BroadcastState.Idle
+                        updateNotification("Disconnected", ConnectionQuality.DISCONNECTED)
+                    }
+                    ConnectionState.ERROR -> {
+                        _broadcastState.value = BroadcastState.Error("Connection error")
+                        updateNotification("Connection error", ConnectionQuality.POOR)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun observeMediasoupEvents() {
+        scope.launch {
+            mediasoupManager.producerId.collect { producerId ->
+                if (producerId != null) {
+                    _broadcastState.value = BroadcastState.Broadcasting("Streaming live audio", ConnectionQuality.EXCELLENT)
+                    updateNotification("On Air: Streaming live!", ConnectionQuality.EXCELLENT)
+                }
+ else if (signalingClient.connectionState.value == ConnectionState.CONNECTED) {
+                    _broadcastState.value = BroadcastState.Broadcasting("Connected to server", ConnectionQuality.GOOD)
+                    updateNotification("Connected, waiting for audio stream...", ConnectionQuality.GOOD)
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = createNotification("Connecting to server...")
+        val serverUrl = intent?.getStringExtra("serverUrl")
+        if (serverUrl == null) {
+            Logger.e("Service: serverUrl is null, stopping service")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        initializeManagers(serverUrl)
+
+        val notification = createNotification("Initiating broadcast...", ConnectionQuality.DISCONNECTED)
         startForeground(NOTIFICATION_ID, notification)
-        return START_STICKY // Auto-restart if killed by system
+        startBroadcast()
+        return START_STICKY
     }
 
-    fun updateNotification(status: String, isStreaming: Boolean = false) {
-        val notification = createNotification(status, isStreaming)
+    private fun startBroadcast() {
+        requestFocus()
+        signalingClient.connect()
+        mediasoupManager.start()
+        _broadcastState.value = BroadcastState.Connecting
+    }
+
+    fun stopBroadcast() {
+        Logger.i("Service: stopBroadcast called")
+        audioManager.abandonAudioFocusRequest(focusRequest)
+        mediasoupManager.close()
+        signalingClient.disconnect()
+        _broadcastState.value = BroadcastState.Idle
+        stopForeground(true)
+        stopSelf()
+    }
+
+    fun requestFocus() {
+        val result = audioManager.requestAudioFocus(focusRequest)
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        }
+    }
+
+    private fun pauseBroadcastLocally() {
+        mediasoupManager.setMicEnabled(false)
+        updateNotification("Mic Busy: Call or other app", ConnectionQuality.WARNING)
+    }
+
+    private fun resumeBroadcastLocally() {
+        mediasoupManager.setMicEnabled(true)
+        updateNotification("On Air: Streaming live!", ConnectionQuality.EXCELLENT)
+    }
+
+    private fun stopStreamingTemporarily() {
+        mediasoupManager.setMicEnabled(false)
+        updateNotification("Mic Busy: Phone Call", ConnectionQuality.WARNING)
+    }
+
+    private fun attemptRecovery() {
+        // You might want to add more sophisticated logic here, e.g., check if the
+        // app should still be broadcasting before resuming.
+        resumeBroadcastLocally()
+    }
+
+    private fun registerPhoneStateListener() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            Logger.log("BroadcastService: READ_PHONE_STATE permission not granted. Cannot listen to call state.")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                override fun onCallStateChanged(state: Int) {
+                    handleCallStateChanged(state)
+                }
+            }
+            telephonyManager.registerTelephonyCallback(mainExecutor, callback)
+            phoneStateListener = callback
+        } else {
+            @Suppress("DEPRECATION")
+            val listener = object : PhoneStateListener() {
+                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                    handleCallStateChanged(state)
+                }
+            }
+            @Suppress("DEPRECATION")
+            telephonyManager.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+            phoneStateListener = listener
+        }
+    }
+
+    private fun unregisterPhoneStateListener() {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && phoneStateListener is TelephonyCallback -> {
+                telephonyManager.unregisterTelephonyCallback(phoneStateListener as TelephonyCallback)
+            }
+            phoneStateListener is PhoneStateListener -> {
+                @Suppress("DEPRECATION")
+                telephonyManager.listen(phoneStateListener as PhoneStateListener, PhoneStateListener.LISTEN_NONE)
+            }
+        }
+        phoneStateListener = null
+    }
+
+    private fun handleCallStateChanged(state: Int) {
+        when (state) {
+            TelephonyManager.CALL_STATE_RINGING,
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                // Someone is calling the reporter's phone
+                Logger.log("Telecom Intervention: Interrupting broadcast for phone call.")
+                // Notify Mediasoup/Signaling so the studio knows WHY you went silent
+                signalingClient.send("error", SignalingMessage.Error("Mic hijacked by phone call"))
+                stopStreamingTemporarily()
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                // Call ended, try to recover the "On-Air" state
+                attemptRecovery()
+            }
+        }
+    }
+
+    fun updateNotification(status: String, quality: ConnectionQuality) {
+        val notification = createNotification(status, quality)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
-    private fun createNotification(status: String, isStreaming: Boolean = false): Notification {
+    private fun createNotification(status: String, quality: ConnectionQuality): Notification {
         val intent = Intent(this, com.fm.digital.ui.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -50,8 +283,13 @@ class BroadcastService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val icon = if (isStreaming) R.drawable.ic_mic_on else R.drawable.ic_mic_off
-        val color = if (isStreaming) 0xFF4CAF50.toInt() else 0xFFFF9800.toInt()
+        val (icon, color) = when (quality) {
+            ConnectionQuality.EXCELLENT -> R.drawable.ic_mic_on to 0xFF4CAF50.toInt()
+            ConnectionQuality.GOOD -> R.drawable.ic_mic_on to 0xFF8BC34A.toInt()
+            ConnectionQuality.WARNING -> R.drawable.ic_mic_on to 0xFFFF9800.toInt()
+            ConnectionQuality.POOR -> R.drawable.ic_mic_off to 0xFFF44336.toInt()
+            ConnectionQuality.DISCONNECTED -> R.drawable.ic_mic_off to 0xFF757575.toInt()
+        }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("FM Digital Broadcaster")
@@ -87,18 +325,28 @@ class BroadcastService : Service() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "FMDigital::BroadcastWakeLock"
         ).apply {
-            acquire(3 * 60 * 60 * 1000L) // 3 hours max
+            acquire() // Hold wakelock indefinitely
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterPhoneStateListener()
+        job.cancel()
         wakeLock?.release()
         onServiceDestroyed?.invoke()
+        Logger.i("Service: onDestroy")
     }
 
     companion object {
         private const val CHANNEL_ID = "broadcast_channel"
         private const val NOTIFICATION_ID = 1001
     }
+}
+
+sealed class BroadcastState {
+    object Idle : BroadcastState()
+    object Connecting : BroadcastState()
+    data class Broadcasting(val serverInfo: String, val quality: ConnectionQuality) : BroadcastState()
+    data class Error(val message: String) : BroadcastState()
 }

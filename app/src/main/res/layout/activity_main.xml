@@ -84,6 +84,16 @@
             android:text="Stop" />
     </LinearLayout>
 
+    <ProgressBar
+        android:id="@+id/vuMeter"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="8dp"
+        android:max="100"
+        android:layout_marginTop="16dp"
+        android:progressDrawable="@drawable/vu_meter_gradient"
+        app:layout_constraintTop_toBottomOf="@id/controls_layout"/>
+
     <TextView
         android:id="@+id/log_title"
         android:layout_width="wrap_content"
@@ -91,7 +101,7 @@
         android:layout_marginTop="16dp"
         android:text="System Logs:"
         android:textStyle="bold"
-        app:layout_constraintTop_toBottomOf="@id/controls_layout"
+        app:layout_constraintTop_toBottomOf="@id/vuMeter"
         app:layout_constraintStart_toStartOf="parent" />
 
     <FrameLayout
@@ -99,7 +109,7 @@
         android:layout_height="0dp"
         android:layout_marginTop="8dp"
         android:layout_marginBottom="8dp"
-        android:background="#F0F0F0"
+        android:background="#181818"
         app:layout_constraintTop_toBottomOf="@id/log_title"
         app:layout_constraintBottom_toTopOf="@id/version_textview">
 
@@ -127,6 +137,15 @@
         android:text="FM Digital MVP v1.2"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        android:id="@+id/mute_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        app:srcCompat="@drawable/ic_mic_on"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
