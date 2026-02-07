@@ -10,6 +10,8 @@ import org.webrtc.BuiltinAudioEncoderFactoryFactory
 import org.webrtc.BuiltinAudioDecoderFactoryFactory
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.log10
+import kotlin.math.sqrt
 
 class WebRtcEngine(private val context: Context) {
     private val tag = "WebRtcEngine"
@@ -89,11 +91,18 @@ class WebRtcEngine(private val context: Context) {
         for (sample in samples) {
             sum += (sample.toDouble() * sample.toDouble())
         }
-        
-        val rms = Math.sqrt(sum / samples.size)
-        // Scale the RMS (max 32768 for 16-bit) to a 0-100 range
-        // We use a logarithmic-like multiplier for better visual "feeling"
-        return (rms / 32768.0 * 100).toInt().coerceIn(0, 100)
+
+        val rms = sqrt(sum / samples.size)
+        if (rms <= 0.0) return 0
+
+        // Convert to dB. Reference level for 16-bit audio is 32768
+        val db = 20 * log10(rms / 32768.0)
+
+        // Map dB range (-60 dB to 0 dB) to 0-100 range
+        val minDb = -60.0
+        var level = ((db - minDb) * (100.0 / -minDb)).toInt()
+
+        return level.coerceIn(0, 100)
     }
 
     fun startLocalAudio(): AudioTrack? {

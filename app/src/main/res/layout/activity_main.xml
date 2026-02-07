@@ -30,7 +30,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="Server URL (ws://ip:port)"
-            android:text="ws://192.168.8.100:3000"
+            android:text="ws://192.168.8.103:3000"
             android:inputType="textUri" />
     </com.google.android.material.textfield.TextInputLayout>
 

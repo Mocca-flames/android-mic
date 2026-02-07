@@ -25,7 +25,6 @@ import com.fm.digital.R
 import com.fm.digital.networking.ConnectionState
 import com.fm.digital.service.BroadcastService
 import com.fm.digital.service.ConnectionQuality
-import com.fm.digital.webrtc.WebRtcEngine
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.launch
 
@@ -46,9 +45,6 @@ class MainActivity : AppCompatActivity() {
 
     private var broadcastService: BroadcastService? = null
     private var serviceBound = false
-
-    // WebRTC Engine
-    private lateinit var webRtcEngine: WebRtcEngine
 
     // Audio Focus
     private lateinit var audioManager: AudioManager
@@ -102,8 +98,6 @@ class MainActivity : AppCompatActivity() {
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        webRtcEngine = WebRtcEngine(this)
-
         initializeViews()
         Logger.initialize(applicationContext, logTextView)
         Logger.i("App started - Version 2.0 Stable")
@@ -141,7 +135,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         muteButton.setOnClickListener {
-            webRtcEngine.setMicrophoneMute(!webRtcEngine.isMuted.value)
+            viewModel.toggleMute()
         }
     }
 
@@ -156,7 +150,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeAudioLevels() {
         lifecycleScope.launch {
-            webRtcEngine.audioLevels.collect { level ->
+            viewModel.audioLevels.collect { level ->
                 vuMeter.progress = level
             }
         }
@@ -164,7 +158,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeMuteState() {
         lifecycleScope.launch {
-            webRtcEngine.isMuted.collect { isMuted ->
+            viewModel.isMuted.collect { isMuted ->
                 if (isMuted) {
                     muteButton.setImageResource(R.drawable.ic_mic_off)
                 } else {
@@ -315,6 +309,5 @@ class MainActivity : AppCompatActivity() {
         }
         resetAudioManager()
         Logger.close()
-        webRtcEngine.release()
     }
 }

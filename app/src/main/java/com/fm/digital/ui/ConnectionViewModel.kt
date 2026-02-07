@@ -9,10 +9,7 @@ import com.fm.digital.networking.SignalingClientImpl
 import com.fm.digital.networking.SignalingMessage
 import com.fm.digital.webrtc.WebRtcEngine
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 import org.webrtc.*
@@ -24,6 +21,12 @@ class ConnectionViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _messages = MutableSharedFlow<SignalingMessage>()
     val messages: SharedFlow<SignalingMessage> = _messages
+
+    private val _audioLevels = MutableStateFlow(0)
+    val audioLevels: StateFlow<Int> = _audioLevels.asStateFlow()
+
+    private val _isMuted = MutableStateFlow(false)
+    val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
     private var signalingClient: SignalingClient? = null
     private var webRtcEngine: WebRtcEngine? = null
@@ -51,8 +54,21 @@ class ConnectionViewModel(application: Application) : AndroidViewModel(applicati
 
         disconnect()
 
-        webRtcEngine = WebRtcEngine(getApplication())
-        localAudioTrack = webRtcEngine?.startLocalAudio()
+        val engine = WebRtcEngine(getApplication())
+        webRtcEngine = engine
+        localAudioTrack = engine.startLocalAudio()
+
+        // Observe engine states
+        viewModelScope.launch {
+            engine.audioLevels.collect { level ->
+                _audioLevels.value = level
+            }
+        }
+        viewModelScope.launch {
+            engine.isMuted.collect { muted ->
+                _isMuted.value = muted
+            }
+        }
 
         val client = SignalingClientImpl(serverUrl, viewModelScope)
         signalingClient = client
@@ -73,6 +89,13 @@ class ConnectionViewModel(application: Application) : AndroidViewModel(applicati
                 _messages.emit(message)
                 handleMessage(message)
             }
+        }
+    }
+
+    fun toggleMute() {
+        webRtcEngine?.let {
+            val newState = !it.isMuted.value
+            it.setMicrophoneMute(newState)
         }
     }
 
