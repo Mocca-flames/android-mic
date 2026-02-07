@@ -72,6 +72,15 @@ sealed class SignalingMessage {
         val consumerId: String
     ) : SignalingMessage()
 
+    /**
+     * Restart ICE for a transport
+     * Request: { "method": "restartIce", "data": { "transportId": "..." } }
+     */
+    data class RestartIce(
+        val transportId: String
+    ) : SignalingMessage()
+
+
     // ==================== SERVER → CLIENT ====================
 
     /**

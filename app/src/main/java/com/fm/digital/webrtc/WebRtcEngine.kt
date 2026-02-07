@@ -2,10 +2,14 @@ package com.fm.digital.webrtc
 
 import android.content.Context
 import com.fm.digital.ui.Logger
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 import org.webrtc.BuiltinAudioEncoderFactoryFactory
 import org.webrtc.BuiltinAudioDecoderFactoryFactory
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class WebRtcEngine(private val context: Context) {
     private val tag = "WebRtcEngine"
@@ -13,21 +17,50 @@ class WebRtcEngine(private val context: Context) {
     private var factory: PeerConnectionFactory? = null
     private var audioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
+    private var audioDeviceModule: JavaAudioDeviceModule? = null
+
+    private val _audioLevels = MutableStateFlow<Int>(0)
+    val audioLevels = _audioLevels.asStateFlow()
+
+    private val _isMuted = MutableStateFlow<Boolean>(false)
+    val isMuted = _isMuted.asStateFlow()
 
     init {
         initializeFactory()
     }
 
     private fun initializeFactory() {
+        val fieldTrials = "WebRTC-Audio-Min-Expected-Delay-Ms/0/" + // Force 0ms base delay
+                          "WebRTC-Audio-NetEqMaxPrebufMS/60/"     // Cap max buffer at 60ms
+
         val options = PeerConnectionFactory.InitializationOptions.builder(context)
+            .setFieldTrials(fieldTrials) // <--- CRITICAL FOR LATENCY
+            .setEnableInternalTracer(true)
             .createInitializationOptions()
         PeerConnectionFactory.initialize(options)
 
-        val audioDeviceModule = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(false)
-            .setUseHardwareNoiseSuppressor(false)
-            .setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+        audioDeviceModule = JavaAudioDeviceModule.builder(context)
+            .setUseHardwareAcousticEchoCanceler(true)
+            .setUseHardwareNoiseSuppressor(true)
+            .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            // Low Latency Fix:
+            .setAudioTrackStateCallback(object : JavaAudioDeviceModule.AudioTrackStateCallback {
+                override fun onWebRtcAudioTrackStart() { Logger.log("Audio Track Started") }
+                override fun onWebRtcAudioTrackStop() { Logger.log("Audio Track Stopped") }
+            })
+            // TAP INTO THE AUDIO SAMPLES HERE
+            .setSamplesReadyCallback { samples ->
+                val shortArray = ShortArray(samples.data.size / 2)
+                ByteBuffer.wrap(samples.data).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortArray)
+                val level = calculateLevel(shortArray)
+                _audioLevels.value = level
+            }
+            .setUseStereoInput(true)
+            .setUseStereoOutput(true)
             .createAudioDeviceModule()
+
+        // Force AAudio via AudioAttributes
+        audioDeviceModule?.setMicrophoneMute(false)
 
         val audioEncoderFactory = BuiltinAudioEncoderFactoryFactory()
         val audioDecoderFactory = BuiltinAudioDecoderFactoryFactory()
@@ -41,12 +74,31 @@ class WebRtcEngine(private val context: Context) {
             .setAudioDecoderFactoryFactory(audioDecoderFactory)
             .createPeerConnectionFactory()
         
-        Logger.log("$tag: PeerConnectionFactory initialized")
+        Logger.i("$tag: PeerConnectionFactory initialized")
+    }
+
+    fun setMicrophoneMute(isMuted: Boolean) {
+        audioDeviceModule?.setMicrophoneMute(isMuted)
+        _isMuted.value = isMuted
+    }
+
+    private fun calculateLevel(samples: ShortArray): Int {
+        var sum = 0.0
+        if (samples.isEmpty()) return 0
+        
+        for (sample in samples) {
+            sum += (sample.toDouble() * sample.toDouble())
+        }
+        
+        val rms = Math.sqrt(sum / samples.size)
+        // Scale the RMS (max 32768 for 16-bit) to a 0-100 range
+        // We use a logarithmic-like multiplier for better visual "feeling"
+        return (rms / 32768.0 * 100).toInt().coerceIn(0, 100)
     }
 
     fun startLocalAudio(): AudioTrack? {
         if (factory == null) {
-            Logger.log("$tag: Error: Factory not initialized")
+            Logger.e("$tag: Error: Factory not initialized")
             return null
         }
 
@@ -61,9 +113,11 @@ class WebRtcEngine(private val context: Context) {
         localAudioTrack = factory?.createAudioTrack("ARDM_AUDIO_V1", audioSource)
         localAudioTrack?.setEnabled(true)
         
-        Logger.log("$tag: Local audio track created and enabled")
+        Logger.i("$tag: Local audio track created and enabled")
         return localAudioTrack
     }
+
+    fun getLocalAudioTrack(): AudioTrack? = localAudioTrack
 
     fun createPeerConnection(
         rtcConfig: PeerConnection.RTCConfiguration,
@@ -86,6 +140,7 @@ class WebRtcEngine(private val context: Context) {
         localAudioTrack?.dispose()
         audioSource?.dispose()
         factory?.dispose()
-        Logger.log("$tag: Engine released")
+        audioDeviceModule?.release()
+        Logger.i("$tag: Engine released")
     }
 }

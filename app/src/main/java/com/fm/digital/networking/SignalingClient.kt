@@ -15,7 +15,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.pow
 
@@ -63,14 +62,14 @@ class SignalingClientImpl(
             _connectionState.value == ConnectionState.CONNECTING) return
 
         _connectionState.value = ConnectionState.CONNECTING
-        Logger.log("WS [Connecting] $serverUrl")
+        Logger.i("WS [Connecting] $serverUrl")
 
         val request = Request.Builder().url(serverUrl).build()
         webSocket = client.newWebSocket(request, this)
     }
 
     override fun disconnect() {
-        Logger.log("WS [Disconnecting]")
+        Logger.i("WS [Disconnecting]")
         webSocket?.close(1000, "Client disconnect")
         _connectionState.value = ConnectionState.DISCONNECTED
     }
@@ -98,7 +97,7 @@ class SignalingClientImpl(
                 put("producerId", message.producerId)
             }
             else -> {
-                Logger.log("WS [Warning] Unsupported message type for sending: ${message::class.simpleName}")
+                Logger.w("WS [Warning] Unsupported message type for sending: ${message::class.simpleName}")
                 return
             }
         }
@@ -109,16 +108,16 @@ class SignalingClientImpl(
         }
 
         if (_connectionState.value == ConnectionState.CONNECTED) {
-            Logger.log("WS [SEND] $method: ${envelope.toString().take(200)}")
+            Logger.d("WS [SEND] $method: ${envelope.toString().take(200)}")
             webSocket?.send(envelope.toString())
         } else {
-            Logger.log("WS [QUEUE] $method")
+            Logger.d("WS [QUEUE] $method")
             messageQueue.add(method to messageJson)
         }
     }
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
-        Logger.log("WS [Connected]")
+        Logger.i("WS [Connected]")
         _connectionState.value = ConnectionState.CONNECTED
         reconnectionAttempts = 0
 
@@ -129,14 +128,14 @@ class SignalingClientImpl(
                     put("method", method)
                     put("data", data)
                 }
-                Logger.log("WS [SEND QUEUED] $method")
+                Logger.d("WS [SEND QUEUED] $method")
                 webSocket.send(envelope.toString())
             }
         }
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {
-        Logger.log("WS [RECV] ${text.take(300)}")
+        Logger.d("WS [RECV] ${text.take(300)}")
 
         scope.launch {
             try {
@@ -145,7 +144,7 @@ class SignalingClientImpl(
                 val data = envelope["data"]?.jsonObject
 
                 if (method == null) {
-                    Logger.log("WS [Warning] No method field in message")
+                    Logger.w("WS [Warning] No method field in message")
                     return@launch
                 }
 
@@ -153,11 +152,11 @@ class SignalingClientImpl(
                 if (message != null) {
                     _messages.emit(message)
                 } else {
-                    Logger.log("WS [Warning] Failed to parse message for method: $method")
+                    Logger.w("WS [Warning] Failed to parse message for method: $method")
                 }
 
             } catch (e: Exception) {
-                Logger.log("WS [ERROR] Parse failed: ${e.message}")
+                Logger.e("WS [ERROR] Parse failed: ${e.message}", e)
                 _messages.emit(SignalingMessage.Error("Parse error: ${e.message}"))
             }
         }
@@ -228,42 +227,42 @@ class SignalingClientImpl(
                 }
 
                 else -> {
-                    Logger.log("WS [Warning] Unknown method: $method")
+                    Logger.w("WS [Warning] Unknown method: $method")
                     null
                 }
             }
         } catch (e: Exception) {
-            Logger.log("WS [ERROR] Failed to parse $method: ${e.message}")
+            Logger.e("WS [ERROR] Failed to parse $method: ${e.message}", e)
             SignalingMessage.Error("Parse error for $method: ${e.message}")
         }
     }
 
     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-        Logger.log("WS [Closing] code=$code, reason=$reason")
+        Logger.i("WS [Closing] code=$code, reason=$reason")
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-        Logger.log("WS [Closed] code=$code")
+        Logger.i("WS [Closed] code=$code")
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-        Logger.log("WS [Failure] ${t.message}")
+        Logger.e("WS [Failure] ${t.message}", t)
         _connectionState.value = ConnectionState.ERROR
         handleReconnection()
     }
 
     private fun handleReconnection() {
         if (reconnectionAttempts >= 5) {
-            Logger.log("WS [Reconnection] Max attempts reached (5)")
+            Logger.w("WS [Reconnection] Max attempts reached (5)")
             return
         }
 
         scope.launch(Dispatchers.IO) {
             val delayMillis = (1000 * 2.0.pow(reconnectionAttempts.toDouble())).toLong()
             reconnectionAttempts++
-            Logger.log("WS [Reconnection] Attempt #$reconnectionAttempts after ${delayMillis}ms")
+            Logger.i("WS [Reconnection] Attempt #$reconnectionAttempts after ${delayMillis}ms")
             delay(delayMillis)
             connect()
         }

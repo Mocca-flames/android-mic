@@ -1,6 +1,10 @@
 package com.fm.digital.ui
 
 import android.content.Context
+import android.graphics.Color
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.widget.TextView
 import java.io.File
@@ -27,29 +31,54 @@ object Logger {
         }
     }
 
-    fun log(message: String) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-        val logMessage = "$timestamp: $message"
+    fun d(message: String) = log("D", message, Color.WHITE)
+    fun i(message: String) = log("I", message, Color.GREEN)
+    fun w(message: String) = log("W", message, Color.YELLOW)
 
-        // Log to logcat
-        Log.d(TAG, logMessage)
+    fun e(message: String, throwable: Throwable? = null) {
+        log("E", message, Color.RED)
+        throwable?.let {
+            Log.e(TAG, message, it)
+            log("E", it.stackTraceToString(), Color.RED)
+        }
+    }
 
-        // Log to file
-        logWriter?.apply {
+    fun log(message: String) = i(message)
+
+    private fun log(level: String, message: String, color: Int) {
+        val timestamp = SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss.SSS",
+            Locale.getDefault()
+        ).format(Date())
+
+        val logMessage = "$timestamp $level: $message"
+
+        when (level) {
+            "D" -> Log.d(TAG, logMessage)
+            "I" -> Log.i(TAG, logMessage)
+            "W" -> Log.w(TAG, logMessage)
+            "E" -> Log.e(TAG, logMessage)
+        }
+
+        logWriter?.let {
             try {
-                append(logMessage)
-                append("\n")
-                flush()
+                it.append(logMessage)
+                it.append("\n")
+                it.flush()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to write to log file", e)
             }
         }
 
-        // Log to UI
-        logTextView?.apply {
-            post {
-                append("$logMessage\n")
-            }
+        logTextView?.post {
+            val spannable = SpannableString("$logMessage\n")
+            spannable.setSpan(
+                ForegroundColorSpan(color),
+                0,
+                spannable.length,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            logTextView?.append(spannable)
         }
     }
 
