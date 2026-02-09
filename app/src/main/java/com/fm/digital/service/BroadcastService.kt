@@ -2,10 +2,13 @@ package com.fm.digital.service
 
 import android.Manifest
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
@@ -49,7 +52,11 @@ class BroadcastService : Service() {
 
     private lateinit var webRtcEngine: WebRtcEngine
     private lateinit var signalingClient: SignalingClient
-    private lateinit var mediasoupManager: MediasoupManager
+    lateinit var mediasoupManager: MediasoupManager
+        private set
+
+    val isMediasoupInitialized: Boolean
+        get() = ::mediasoupManager.isInitialized
 
     private val _broadcastState = MutableStateFlow<BroadcastState>(BroadcastState.Idle)
     val broadcastState: StateFlow<BroadcastState> = _broadcastState.asStateFlow()
@@ -57,6 +64,16 @@ class BroadcastService : Service() {
     var onServiceDestroyed: (() -> Unit)? = null
 
     private lateinit var audioManager: AudioManager
+
+    // Expose network stats from MediasoupManager
+    private val _emptyNetworkStats = MutableStateFlow("")
+    val networkStats: StateFlow<String>
+        get() = if (isMediasoupInitialized) mediasoupManager.networkStats else _emptyNetworkStats
+    
+    // Expose inbound audio level for studio VU meter
+    private val _emptyAudioLevel = MutableStateFlow(0)
+    val inboundAudioLevel: StateFlow<Int>
+        get() = if (isMediasoupInitialized) mediasoupManager.inboundAudioLevel else _emptyAudioLevel
 
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         .setAudioAttributes(
@@ -88,6 +105,24 @@ class BroadcastService : Service() {
 
     private var phoneStateListener: Any? = null
 
+    private val headsetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_HEADSET_PLUG) {
+                val state = intent.getIntExtra("state", -1)
+                when (state) {
+                    0 -> { // HEADSET UNPLUGGED
+                        Logger.log("SAFETY: Unplugged. Forcing EARPIECE.")
+                        applyEmergencyRouting(toEarpiece = true)
+                    }
+                    1 -> { // HEADSET PLUGGED
+                        Logger.log("SAFETY: Headset detected. Routing to HEADPHONES.")
+                        applyEmergencyRouting(toEarpiece = false)
+                    }
+                }
+            }
+        }
+    }
+
     inner class LocalBinder : Binder() {
         fun getService(): BroadcastService = this@BroadcastService
     }
@@ -100,6 +135,7 @@ class BroadcastService : Service() {
         createNotificationChannel()
         acquireWakeLock()
         registerPhoneStateListener()
+        setupHeadsetListener()
     }
 
     private fun initializeManagers(serverUrl: String) {
@@ -142,8 +178,7 @@ class BroadcastService : Service() {
                 if (producerId != null) {
                     _broadcastState.value = BroadcastState.Broadcasting("Streaming live audio", ConnectionQuality.EXCELLENT)
                     updateNotification("On Air: Streaming live!", ConnectionQuality.EXCELLENT)
-                }
- else if (signalingClient.connectionState.value == ConnectionState.CONNECTED) {
+                } else if (signalingClient.connectionState.value == ConnectionState.CONNECTED) {
                     _broadcastState.value = BroadcastState.Broadcasting("Connected to server", ConnectionQuality.GOOD)
                     updateNotification("Connected, waiting for audio stream...", ConnectionQuality.GOOD)
                 }
@@ -207,9 +242,28 @@ class BroadcastService : Service() {
     }
 
     private fun attemptRecovery() {
-        // You might want to add more sophisticated logic here, e.g., check if the
-        // app should still be broadcasting before resuming.
         resumeBroadcastLocally()
+    }
+
+    private fun setupHeadsetListener() {
+        val filter = IntentFilter(Intent.ACTION_HEADSET_PLUG)
+        registerReceiver(headsetReceiver, filter)
+    }
+
+    private fun applyEmergencyRouting(toEarpiece: Boolean) {
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val devices = audioManager.availableCommunicationDevices
+            val targetType = if (toEarpiece) AudioDeviceInfo.TYPE_BUILTIN_EARPIECE 
+                             else AudioDeviceInfo.TYPE_WIRED_HEADSET
+            
+            val targetDevice = devices.firstOrNull { it.type == targetType }
+            targetDevice?.let { audioManager.setCommunicationDevice(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = false
+        }
     }
 
     private fun registerPhoneStateListener() {
@@ -255,14 +309,11 @@ class BroadcastService : Service() {
         when (state) {
             TelephonyManager.CALL_STATE_RINGING,
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                // Someone is calling the reporter's phone
                 Logger.log("Telecom Intervention: Interrupting broadcast for phone call.")
-                // Notify Mediasoup/Signaling so the studio knows WHY you went silent
                 signalingClient.send("error", SignalingMessage.Error("Mic hijacked by phone call"))
                 stopStreamingTemporarily()
             }
             TelephonyManager.CALL_STATE_IDLE -> {
-                // Call ended, try to recover the "On-Air" state
                 attemptRecovery()
             }
         }
@@ -325,13 +376,14 @@ class BroadcastService : Service() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "FMDigital::BroadcastWakeLock"
         ).apply {
-            acquire() // Hold wakelock indefinitely
+            acquire()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterPhoneStateListener()
+        unregisterReceiver(headsetReceiver)
         job.cancel()
         wakeLock?.release()
         onServiceDestroyed?.invoke()

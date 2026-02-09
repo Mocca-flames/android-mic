@@ -16,6 +16,7 @@ import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import com.google.android.material.switchmaterial.SwitchMaterial
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
@@ -42,6 +43,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logTextView: TextView
     private lateinit var vuMeter: ProgressBar
     private lateinit var muteButton: FloatingActionButton
+    private lateinit var studioVuMeter: ProgressBar
+    private lateinit var rttText: TextView
+    private lateinit var monitorSwitch: SwitchMaterial
 
     private var broadcastService: BroadcastService? = null
     private var serviceBound = false
@@ -106,6 +110,8 @@ class MainActivity : AppCompatActivity() {
         observeConnectionState()
         observeAudioLevels()
         observeMuteState()
+        observeNetworkStats()
+        observeStudioAudioLevels()
     }
 
     private fun initializeViews() {
@@ -119,6 +125,9 @@ class MainActivity : AppCompatActivity() {
         logTextView = findViewById(R.id.log_textview)
         vuMeter = findViewById(R.id.vuMeter)
         muteButton = findViewById(R.id.mute_button)
+        studioVuMeter = findViewById(R.id.studioVuMeter)
+        rttText = findViewById(R.id.rttText)
+        monitorSwitch = findViewById(R.id.monitorSwitch)
 
         versionTextView.text = "Version: 2.0 - Stable Broadcast (2+ hours)"
     }
@@ -136,6 +145,20 @@ class MainActivity : AppCompatActivity() {
 
         muteButton.setOnClickListener {
             viewModel.toggleMute()
+        }
+
+        // Monitor switch for studio feed
+        monitorSwitch.setOnCheckedChangeListener { _, isChecked ->
+            broadcastService?.let { service ->
+                if (service.isMediasoupInitialized) {
+                    service.mediasoupManager.setPlaybackEnabled(isChecked)
+                    
+                    // Safety: Warn if using earpiece for monitoring
+                    if (isChecked && !isHeadsetPlugged()) {
+                        Toast.makeText(this, "Caution: Using Earpiece for Monitor", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
         }
     }
 
@@ -166,6 +189,26 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun observeNetworkStats() {
+        lifecycleScope.launch {
+            broadcastService?.networkStats?.collect { stats ->
+                rttText.text = stats
+            }
+        }
+    }
+
+    private fun observeStudioAudioLevels() {
+        lifecycleScope.launch {
+            broadcastService?.inboundAudioLevel?.collect { level ->
+                studioVuMeter.progress = level
+            }
+        }
+    }
+
+    private fun isHeadsetPlugged(): Boolean {
+        return audioManager.isWiredHeadsetOn
     }
 
     private fun checkPermissionAndStart() {

@@ -32,11 +32,14 @@ class WebRtcEngine(private val context: Context) {
     }
 
     private fun initializeFactory() {
-        val fieldTrials = "WebRTC-Audio-Min-Expected-Delay-Ms/0/" + // Force 0ms base delay
-                          "WebRTC-Audio-NetEqMaxPrebufMS/60/"     // Cap max buffer at 60ms
+        // Aggressive low-latency tuning for Studio usage
+        val fieldTrials = "WebRTC-Audio-Min-Expected-Delay-Ms/0/" + 
+                          "WebRTC-Audio-NetEqMaxPrebufMS/60/" +
+                          "WebRTC-Audio-NetEqFastAccelerate/Enabled/" +
+                          "WebRTC-Audio-NetEqTargetLevelOffset/0/"
 
         val options = PeerConnectionFactory.InitializationOptions.builder(context)
-            .setFieldTrials(fieldTrials) // <--- CRITICAL FOR LATENCY
+            .setFieldTrials(fieldTrials)
             .setEnableInternalTracer(true)
             .createInitializationOptions()
         PeerConnectionFactory.initialize(options)
@@ -45,12 +48,10 @@ class WebRtcEngine(private val context: Context) {
             .setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true)
             .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-            // Low Latency Fix:
             .setAudioTrackStateCallback(object : JavaAudioDeviceModule.AudioTrackStateCallback {
                 override fun onWebRtcAudioTrackStart() { Logger.log("Audio Track Started") }
                 override fun onWebRtcAudioTrackStop() { Logger.log("Audio Track Stopped") }
             })
-            // TAP INTO THE AUDIO SAMPLES HERE
             .setSamplesReadyCallback { samples ->
                 val shortArray = ShortArray(samples.data.size / 2)
                 ByteBuffer.wrap(samples.data).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortArray)
@@ -61,7 +62,6 @@ class WebRtcEngine(private val context: Context) {
             .setUseStereoOutput(true)
             .createAudioDeviceModule()
 
-        // Force AAudio via AudioAttributes
         audioDeviceModule?.setMicrophoneMute(false)
 
         val audioEncoderFactory = BuiltinAudioEncoderFactoryFactory()
@@ -76,7 +76,7 @@ class WebRtcEngine(private val context: Context) {
             .setAudioDecoderFactoryFactory(audioDecoderFactory)
             .createPeerConnectionFactory()
         
-        Logger.i("$tag: PeerConnectionFactory initialized")
+        Logger.i("$tag: PeerConnectionFactory initialized with low-latency tuning")
     }
 
     fun setMicrophoneMute(isMuted: Boolean) {
@@ -95,12 +95,9 @@ class WebRtcEngine(private val context: Context) {
         val rms = sqrt(sum / samples.size)
         if (rms <= 0.0) return 0
 
-        // Convert to dB. Reference level for 16-bit audio is 32768
         val db = 20 * log10(rms / 32768.0)
-
-        // Map dB range (-60 dB to 0 dB) to 0-100 range
         val minDb = -60.0
-        var level = ((db - minDb) * (100.0 / -minDb)).toInt()
+        val level = ((db - minDb) * (100.0 / -minDb)).toInt()
 
         return level.coerceIn(0, 100)
     }
@@ -122,7 +119,7 @@ class WebRtcEngine(private val context: Context) {
         localAudioTrack = factory?.createAudioTrack("ARDM_AUDIO_V1", audioSource)
         localAudioTrack?.setEnabled(true)
         
-        Logger.i("$tag: Local audio track created and enabled")
+        Logger.i("$tag: Local audio track created")
         return localAudioTrack
     }
 

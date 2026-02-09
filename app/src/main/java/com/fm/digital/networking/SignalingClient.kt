@@ -96,6 +96,12 @@ class SignalingClientImpl(
             is SignalingMessage.Consume -> buildJsonObject {
                 put("producerId", message.producerId)
             }
+            is SignalingMessage.ResumeConsumer -> buildJsonObject {
+                put("consumerId", message.consumerId)
+            }
+            is SignalingMessage.RestartIce -> buildJsonObject {
+                put("transportId", message.transportId)
+            }
             else -> {
                 Logger.w("WS [Warning] Unsupported message type for sending: ${message::class.simpleName}")
                 return
@@ -217,6 +223,26 @@ class SignalingClientImpl(
                     val rtpParameters = data["rtpParameters"] ?: JsonObject(emptyMap())
 
                     SignalingMessage.Consumed(id, producerId, kind, rtpParameters)
+                }
+
+                "newProducer" -> {
+                    val producerId = data?.get("producerId")?.jsonPrimitive?.content
+                        ?: throw IllegalArgumentException("Missing producerId")
+                    val peerId = data["peerId"]?.jsonPrimitive?.content ?: "unknown"
+                    val kind = data["kind"]?.jsonPrimitive?.content ?: "audio"
+                    SignalingMessage.NewProducer(producerId, peerId, kind)
+                }
+
+                "producerClosed" -> {
+                    val producerId = data?.get("producerId")?.jsonPrimitive?.content
+                        ?: throw IllegalArgumentException("Missing producerId")
+                    SignalingMessage.ProducerClosed(producerId)
+                }
+
+                "peerLeft" -> {
+                    val peerId = data?.get("peerId")?.jsonPrimitive?.content
+                        ?: throw IllegalArgumentException("Missing peerId")
+                    SignalingMessage.PeerLeft(peerId)
                 }
 
                 "error" -> {
